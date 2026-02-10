@@ -105,3 +105,37 @@ class PlaceSearch:
                 )
             )
         return hits
+
+
+if __name__ == "__main__":
+    import sys
+    
+    if len(sys.argv) < 2:
+        print("Usage: python -m src.services.search_places <query> [limit] [min_score]")
+        print("Example: python -m src.services.search_places \"Ahrensfelde\"")
+        sys.exit(1)
+    
+    query = sys.argv[1]
+    limit = int(sys.argv[2]) if len(sys.argv) > 2 else 10
+    min_score = int(sys.argv[3]) if len(sys.argv) > 3 else 60
+    
+    try:
+        search = PlaceSearch.load_default()
+        results = search.search(query, limit=limit, min_score=min_score)
+        
+        if not results:
+            print(f"No results found for: {query}")
+        else:
+            print(f"Found {len(results)} result(s) for: {query}\n")
+            for hit in results:
+                print(f"  {hit.name:<40} (ID: {hit.place_id}, Score: {hit.score:.1f})")
+                if hit.district:
+                    print(f"    District: {hit.district}")
+                if hit.lat and hit.lon:
+                    print(f"    Coordinates: {hit.lat:.4f}, {hit.lon:.4f}")
+                if hit.verband_name:
+                    print(f"    Verband: {hit.verband_name}")
+                print()
+    except FileNotFoundError as e:
+        print(f"Error: {e}")
+        sys.exit(1)

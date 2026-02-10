@@ -34,6 +34,10 @@ OUT_INDEX = PROJECT_ROOT / "data" / "processed" / "places_index.json"
 # --- Column handling ---------------------------------------------------------
 
 CANON_MAP = {
+    "ortsteil-nr": "ortsteil_nr",
+    "ortsteil-nr.": "ortsteil_nr",
+    "ortsteil_nr": "ortsteil_nr",
+
     "status -id": "status_id",
     "status-id": "status_id",
     "status_id": "status_id",
@@ -78,7 +82,22 @@ CANON_MAP = {
 
     "letzte korrektur": "last_modified",
     "korrektur(en)": "corrections",
+
+
 }
+
+CANON_MAP.update({
+    # UTM aus zweizeiligem Excel-Header (nach Flattening)
+    "utm-koordinaten (etrs 89) zone": "utm_zone",
+    "utm-koordinaten (etrs 89) ostwert": "utm_easting",
+    "utm-koordinaten (etrs 89) nordwert": "utm_northing",
+
+    # optional: falls mal Groß/Kleinschreibung/Bindestrich variiert
+    "utm koordinaten (etrs 89) zone": "utm_zone",
+    "utm koordinaten (etrs 89) ostwert": "utm_easting",
+    "utm koordinaten (etrs 89) nordwert": "utm_northing",
+})
+
 
 RE_WHITESPACE = re.compile(r"\s+")
 
@@ -162,23 +181,84 @@ def utm_to_wgs84(zone: Any, easting: Any, northing: Any) -> Tuple[Optional[float
 
 def read_excel_loose(path: Path) -> pd.DataFrame:
     """
-    Reads GemVerz.xlsx in a way that tolerates:
-    - first row header
-    - potential extra top rows
-    - mixed types
-
-    Strategy:
-    1) try header=0
-    2) if required columns missing, try header=1..5
+    Reads GemVerz.xlsx with support for 2-row (merged) headers.
+    Tries:
+      - 2-row header (MultiIndex) with flattening
+      - fallback single-row header
     """
-    required_norm = {"status -id", "status", "gemeinde, ortsteil, gemeindeteil, wohnplatz"}
+
+    def flatten_cols(cols) -> list[str]:
+        # cols may be Index or MultiIndex
+        if not isinstance(cols, pd.MultiIndex):
+            return [str(c) for c in cols]
+
+        out = []
+        for a, b in cols.to_list():
+            a = "" if pd.isna(a) else str(a).strip()
+            b = "" if pd.isna(b) else str(b).strip()
+
+            # if second header exists, join them; else use first
+            if b and not b.lower().startswith("unnamed"):
+                out.append(f"{a} {b}".strip())
+            else:
+                out.append(a or b)
+        return out
+
+    required_norm_single = {"status -id", "status", "gemeinde, ortsteil, gemeindeteil, wohnplatz"}
+    required_norm_multi = {
+        "utm-koordinaten (etrs 89) zone",
+        "utm-koordinaten (etrs 89) ostwert",
+        "utm-koordinaten (etrs 89) nordwert",
+    }
+
+    # try header with 2 rows (MultiIndex)
+    for header_row in range(0, 6):
+        df = pd.read_excel(path, header=[header_row, header_row + 1], dtype=str, engine="openpyxl")
+        df.columns = flatten_cols(df.columns)
+
+        cols_norm = {norm_col(c) for c in df.columns}
+        if required_norm_single.issubset(cols_norm) and required_norm_multi.issubset(cols_norm):
+            return df
+
+    # fallback: single header
     for header_row in range(0, 6):
         df = pd.read_excel(path, header=header_row, dtype=str, engine="openpyxl")
         cols_norm = {norm_col(c) for c in df.columns}
-        if required_norm.issubset(cols_norm):
+        if required_norm_single.issubset(cols_norm):
             return df
-    # fallback: just read with header=0
+
     return pd.read_excel(path, header=0, dtype=str, engine="openpyxl")
+
+def _autofix_utm_columns(df):
+    """
+    Fix UTM column names that may not have been properly normalized.
+    Finds columns with "utm" and keywords like "zone", "ostwert"/"easting", "nordwert"/"northing"
+    and renames them to the canonical names: utm_zone, utm_easting, utm_northing
+    """
+    cols = list(df.columns)
+
+    # Direct check: if already properly named, return
+    if "utm_zone" in cols and "utm_easting" in cols and "utm_northing" in cols:
+        return df
+
+    # Find candidates for each UTM component
+    utm_zone_candidates = [c for c in cols if "zone" in c.lower() and "utm" in c.lower()]
+    utm_easting_candidates = [c for c in cols if ("ostwert" in c.lower() or "easting" in c.lower()) and "utm" in c.lower()]
+    utm_northing_candidates = [c for c in cols if ("nordwert" in c.lower() or "northing" in c.lower()) and "utm" in c.lower()]
+
+    rename = {}
+    if "utm_zone" not in cols and utm_zone_candidates:
+        rename[utm_zone_candidates[0]] = "utm_zone"
+    if "utm_easting" not in cols and utm_easting_candidates:
+        rename[utm_easting_candidates[0]] = "utm_easting"
+    if "utm_northing" not in cols and utm_northing_candidates:
+        rename[utm_northing_candidates[0]] = "utm_northing"
+
+    if rename:
+        df = df.rename(columns=rename)
+        print(f"DEBUG: _autofix renamed columns: {rename}")
+
+    return df
 
 
 def main() -> None:
@@ -197,14 +277,18 @@ def main() -> None:
             rename[c] = nc
     df = df.rename(columns=rename)
 
-    required = ["status_id", "status_code", "name", "ags", "ars", "district", "utm_zone", "utm_easting", "utm_northing"]
+    # Apply autofix after main renaming to catch remaining variations
+    df = _autofix_utm_columns(df)
+
+
+    required = ["ortsteil_nr", "status_code", "name", "ags", "ars", "district", "utm_zone", "utm_easting", "utm_northing"]
     missing = [c for c in required if c not in df.columns]
     if missing:
         raise ValueError(
             "Missing required columns after normalization.\n"
             f"Missing: {missing}\n"
             f"Have: {list(df.columns)}\n\n"
-            "Tip: Excel headers may be different (e.g. 'Status -ID' vs 'Status -Id').\n"
+            "Tip: Excel headers may be different (e.g. 'Ortsteil-Nr' vs 'Ortsteil-nr').\n"
             "If this happens, copy/paste the exact header row and extend CANON_MAP."
         )
 
@@ -214,7 +298,7 @@ def main() -> None:
 
     with OUT_PLACES.open("w", encoding="utf-8") as f:
         for _, row in df.iterrows():
-            place_id = to_str_safe(row.get("status_id"))
+            place_id = to_str_safe(row.get("ortsteil_nr"))
             name = to_str_safe(row.get("name"))
             if not place_id or not name:
                 continue
