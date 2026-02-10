@@ -49,3 +49,7 @@ share/python-wheels/
 # OS-specific files
 .DS_Store
 Thumbs.db
+ 
+# Debug files
+debug_*.py
+debug_*.ipynb
